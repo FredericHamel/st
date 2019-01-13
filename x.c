@@ -67,6 +67,7 @@ static void clipcopy(const Arg *);
 static void clippaste(const Arg *);
 static void numlock(const Arg *);
 static void selpaste(const Arg *);
+static void setpalette(const Arg *);
 static void zoom(const Arg *);
 static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
@@ -284,6 +285,28 @@ selpaste(const Arg *dummy)
 {
 	XConvertSelection(xw.dpy, XA_PRIMARY, xsel.xtarget, XA_PRIMARY,
 			xw.win, CurrentTime);
+}
+
+void
+setpalette(const Arg *arg)
+{
+	int i = arg->i;
+	if (i < 0) {
+		current_palette = (current_palette + 1) % LEN(palettes);
+	} else {
+		// Implies current_palette < LEN(palettes)
+		current_palette = i;
+	}
+	colorname = palettes[current_palette].colorname;
+	defaultfg = palettes[current_palette].fg;
+	defaultbg = palettes[current_palette].bg;
+
+	for (int j = 0; j < LEN(palettes[0].colorname); ++j) {
+		if (xsetcolorname(j, colorname[j]))
+			die("unable to set color '%s'\n", colorname[j]);
+	}
+	cresize(win.w, win.h);
+	redraw();
 }
 
 void
@@ -736,7 +759,7 @@ xloadcolor(int i, const char *name, Color *ncolor)
 			return XftColorAllocValue(xw.dpy, xw.vis,
 			                          xw.cmap, &color, ncolor);
 		} else
-			name = colorname[i];
+			name = GETCOLORNAME(i);
 	}
 
 	return XftColorAllocName(xw.dpy, xw.vis, xw.cmap, name, ncolor);
@@ -753,13 +776,13 @@ xloadcols(void)
 		for (cp = dc.col; cp < &dc.col[dc.collen]; ++cp)
 			XftColorFree(xw.dpy, xw.vis, xw.cmap, cp);
 	} else {
-		dc.collen = MAX(LEN(colorname), 256);
+		dc.collen = MAX(NBCOLORS, 256);
 		dc.col = xmalloc(dc.collen * sizeof(Color));
 	}
 
 	for (i = 0; i < dc.collen; i++)
 		if (!xloadcolor(i, NULL, &dc.col[i])) {
-			if (colorname[i])
+			if (GETCOLORNAME(i))
 				die("could not allocate color '%s'\n", colorname[i]);
 			else
 				die("could not allocate color %d\n", i);
@@ -997,6 +1020,7 @@ xunloadfont(Font *f)
 	FcPatternDestroy(f->pattern);
 	if (f->set)
 		FcFontSetDestroy(f->set);
+	redraw();
 }
 
 void
