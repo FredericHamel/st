@@ -1020,7 +1020,6 @@ xunloadfont(Font *f)
 	FcPatternDestroy(f->pattern);
 	if (f->set)
 		FcFontSetDestroy(f->set);
-	redraw();
 }
 
 void
