@@ -5,6 +5,7 @@
 #include <locale.h>
 #include <signal.h>
 #include <sys/select.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include <libgen.h>
@@ -154,6 +155,12 @@ static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
 static void xdrawglyph(Glyph, int, int);
 static void xclear(int, int, int, int);
 static int xgeommasktogravity(int);
+static void xim_open(Display *);
+static void ximinstantiate(Display *, XPointer, XPointer);
+static void xim_destroy(XIM, XPointer, XPointer);
+static void xim_preedit_start(XIM, XPointer, XPointer);
+static void xim_preedit_done(XIM, XPointer, XPointer);
+static void xim_preedit_draw(XIM, XPointer, XIMPreeditDrawCallbackStruct *);
 static void xinit(int, int);
 static void cresize(int, int);
 static void xresize(int, int);
@@ -1036,6 +1043,102 @@ xunloadfonts(void)
 }
 
 void
+xim_open(Display *dpy)
+{
+  XVaNestedList preedit_attr;
+  XIMCallback xcb[3];
+	XIMCallback destroy = { .client_data = NULL, .callback = xim_destroy };
+
+	if ((xw.xim = XOpenIM(dpy, NULL, NULL, NULL)) == NULL) {
+		XSetLocaleModifiers("@im=local");
+		if ((xw.xim = XOpenIM(dpy, NULL, NULL, NULL)) == NULL) {
+			XSetLocaleModifiers("@im=");
+			if ((xw.xim = XOpenIM(dpy,
+							NULL, NULL, NULL)) == NULL) {
+				die("XOpenIM failed. Could not open input"
+						" device.\n");
+			}
+		}
+	}
+
+	xcb[0].client_data = NULL; xcb[0].callback = (XIMProc)xim_preedit_start;
+	xcb[1].client_data = NULL; xcb[1].callback = (XIMProc)xim_preedit_done;
+	xcb[2].client_data = NULL; xcb[2].callback = (XIMProc)xim_preedit_draw;
+
+	preedit_attr = XVaCreateNestedList(0,
+			XNPreeditStartCallback, &xcb[0],
+			XNPreeditDoneCallback, &xcb[1],
+			XNPreeditDrawCallback, &xcb[2],
+			NULL);
+
+	if (XSetIMValues(xw.xim, XNDestroyCallback, &destroy, NULL) != NULL)
+		die("XSetIMValues failed. Could not set input method value.\n");
+
+	xw.xic = XCreateIC(xw.xim,
+			XNInputStyle, XIMPreeditCallbacks | XIMStatusNothing,
+			XNClientWindow, xw.win,
+			XNFocusWindow, xw.win,
+			preedit_attr ? XNPreeditAttributes : NULL,
+			preedit_attr,
+			NULL);
+	if (xw.xic == NULL)
+		die("XCreateIC failed. Could not obtain input method.\n");
+}
+
+void
+ximinstantiate(Display *dpy, XPointer client, XPointer call)
+{
+	xim_open(dpy);
+	XUnregisterIMInstantiateCallback(dpy, NULL, NULL, NULL,
+			ximinstantiate, NULL);
+}
+
+void
+xim_destroy(XIM xim, XPointer client, XPointer call)
+{
+	xw.xim = NULL;
+	XRegisterIMInstantiateCallback(xw.dpy, NULL, NULL, NULL,
+			ximinstantiate, NULL);
+}
+
+void
+xim_preedit_start(XIM xim, XPointer client, XPointer call_data)
+{
+  printf("xim_preedit_start()\n");
+}
+
+void
+xim_preedit_done(XIM xim, XPointer client, XPointer call_data)
+{
+  printf("xim_preedit_done()\n");
+}
+
+void
+xim_preedit_draw(XIM xim, XPointer client, XIMPreeditDrawCallbackStruct *call_data)
+{
+	const char bs = '\b';
+	XIMText *text = call_data->text;
+	short length;
+
+	int i = 0;
+	while (i < call_data->chg_length) {
+		ttywrite(&bs, 1, 0);
+		i++;
+	}
+	if (text) {
+		if (!text->encoding_is_wchar && text->string.multi_byte) {
+			// TODO: implement char to utf8
+			printf("caret(%d) chg_start(%d) chg_end(%d) length(%hd) %s\n",
+					call_data->caret,
+					call_data->chg_first, call_data->chg_length, text->length,
+					text->string.multi_byte);
+			length = strlen(text->string.multi_byte);
+			ttywrite(text->string.multi_byte, length, 1);
+		}
+	}
+}
+
+void
 xinit(int cols, int rows)
 {
 	XGCValues gcvalues;
@@ -1070,7 +1173,7 @@ xinit(int cols, int rows)
 	xw.attrs.background_pixel = dc.col[defaultbg].pixel;
 	xw.attrs.border_pixel = dc.col[defaultbg].pixel;
 	xw.attrs.bit_gravity = NorthWestGravity;
-	xw.attrs.event_mask = FocusChangeMask | KeyPressMask
+	xw.attrs.event_mask = FocusChangeMask | KeyPressMask  | KeyReleaseMask
 		| ExposureMask | VisibilityChangeMask | StructureNotifyMask
 		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
 	xw.attrs.colormap = xw.cmap;
@@ -1098,22 +1201,7 @@ xinit(int cols, int rows)
 	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
 
 	/* input methods */
-	if ((xw.xim = XOpenIM(xw.dpy, NULL, NULL, NULL)) == NULL) {
-		XSetLocaleModifiers("@im=local");
-		if ((xw.xim =  XOpenIM(xw.dpy, NULL, NULL, NULL)) == NULL) {
-			XSetLocaleModifiers("@im=");
-			if ((xw.xim = XOpenIM(xw.dpy,
-					NULL, NULL, NULL)) == NULL) {
-				die("XOpenIM failed. Could not open input"
-					" device.\n");
-			}
-		}
-	}
-	xw.xic = XCreateIC(xw.xim, XNInputStyle, XIMPreeditNothing
-					   | XIMStatusNothing, XNClientWindow, xw.win,
-					   XNFocusWindow, xw.win, NULL);
-	if (xw.xic == NULL)
-		die("XCreateIC failed. Could not obtain input method.\n");
+	xim_open(xw.dpy);
 
 	/* white cursor, black outline */
 	cursor = XCreateFontCursor(xw.dpy, mouseshape);
@@ -1592,6 +1680,17 @@ xfinishdraw(void)
 }
 
 void
+xximspot(int x, int y)
+{
+	//XPoint spot = { borderpx + x * win.cw, borderpx + (y + 1) * win.ch };
+	XPoint spot = { 30, 0 };
+	XVaNestedList attr = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
+
+	XSetICValues(xw.xic, XNPreeditAttributes, attr, NULL);
+	XFree(attr);
+}
+
+void
 expose(XEvent *ev)
 {
 	redraw();
@@ -1713,7 +1812,6 @@ kmap(KeySym k, uint state)
 			continue;
 
 		if (IS_SET(MODE_APPCURSOR) ? kp->appcursor < 0 : kp->appcursor > 0)
-			continue;
 
 		return kp->s;
 	}
