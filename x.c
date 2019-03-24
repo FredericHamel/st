@@ -1811,6 +1811,7 @@ kmap(KeySym k, uint state)
 			continue;
 
 		if (IS_SET(MODE_APPCURSOR) ? kp->appcursor < 0 : kp->appcursor > 0)
+			continue;
 
 		return kp->s;
 	}
