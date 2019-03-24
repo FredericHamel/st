@@ -1682,8 +1682,7 @@ xfinishdraw(void)
 void
 xximspot(int x, int y)
 {
-	//XPoint spot = { borderpx + x * win.cw, borderpx + (y + 1) * win.ch };
-	XPoint spot = { 30, 0 };
+	XPoint spot = { borderpx + x * win.cw, borderpx + (y + 1) * win.ch };
 	XVaNestedList attr = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
 
 	XSetICValues(xw.xic, XNPreeditAttributes, attr, NULL);
