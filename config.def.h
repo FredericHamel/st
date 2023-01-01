@@ -11,13 +11,15 @@ static int borderpx = 2;
 /*
  * What program is execed by st depends of these precedence rules:
  * 1: program passed with -e
- * 2: utmp option
+ * 2: scroll and/or utmp
  * 3: SHELL environment variable
  * 4: value of shell in /etc/passwd
  * 5: value of shell in config.h
  */
 static char *shell = "/bin/sh";
 char *utmp = NULL;
+/* scroll program: to enable use a string like "scroll" */
+char *scroll = NULL;
 char *stty_args = "stty raw pass8 nl -echo -iexten -cstopb 38400";
 
 /* identification sequence returned in DA and DECID */
@@ -30,20 +32,33 @@ static float chscale = 1.0;
 /*
  * word delimiter string
  *
- * More advanced example: " `'\"()[]{}"
+ * More advanced example: L" `'\"()[]{}"
  */
-char *worddelimiters = " ";
+wchar_t *worddelimiters = L" ";
 
 /* selection timeouts (in milliseconds) */
 static unsigned int doubleclicktimeout = 300;
 static unsigned int tripleclicktimeout = 600;
 
-/* alt screens */
-int allowaltscreen = 1;
-
 /* frames per second st should at maximum draw to the screen */
 static unsigned int xfps = 120;
 static unsigned int actionfps = 30;
+
+/* alt screens */
+int allowaltscreen = 1;
+
+/* allow certain non-interactive (insecure) window operations such as:
+   setting the clipboard text */
+int allowwindowops = 0;
+
+/*
+ * draw latency range in ms - from new content/keypress/etc until drawing.
+ * within this range, st draws when content stops arriving (idle). mostly it's
+ * near minlatency, but it waits longer for slow updates to avoid partial draw.
+ * low minlatency will tear/flicker more, as it can "detect" idle too early.
+ */
+static double minlatency = 8;
+static double maxlatency = 33;
 
 /*
  * blinking timeout (set to 0 to disable blinking) for the terminal blinking
@@ -55,6 +70,18 @@ static unsigned int blinktimeout = 800;
  * thickness of underline and bar cursors
  */
 static unsigned int cursorthickness = 2;
+
+/*
+ * 1: render most of the lines/blocks characters without using the font for
+ *    perfect alignment between cells (U2500 - U259F except dashes/diagonals).
+ *    Bold affects lines thickness if boxdraw_bold is not 0. Italic is ignored.
+ * 0: disable (render all U25XX glyphs normally from the font).
+ */
+const int boxdraw = 1;
+const int boxdraw_bold = 1;
+
+/* braille (U28XX):  1: render as adjacent "pixels",  0: use font */
+const int boxdraw_braille = 1;
 
 /*
  * bell volume. It must be a value between -100 and 100. Use 0 for disabling
@@ -82,35 +109,100 @@ char *termname = "st-256color";
  */
 unsigned int tabspaces = 8;
 
-/* Terminal colors (16 first used in escape sequence) */
-static const char *colorname[] = {
-	/* 8 normal colors */
-	"black",
-	"red3",
-	"green3",
-	"yellow3",
-	"blue2",
-	"magenta3",
-	"cyan3",
-	"gray90",
+static int current_palette = 0;
 
-	/* 8 bright colors */
-	"gray50",
-	"red",
-	"green",
-	"yellow",
-	"#5c5cff",
-	"magenta",
-	"cyan",
-	"white",
+// 256 mode
+#define NBCOLORS 256 + LEN(extra_colorname)
+#define GETCOLORNAME(i) i < sizeof(palettes[0].colorname) ? colorname[i] : i < 256 ? 0 : extra_colorname[i - 256]
 
-	[255] = 0,
-
+static const char *extra_colorname[] = {
 	/* more colors can be added after 255 to use with DefaultXX */
 	"#cccccc",
 	"#555555",
 };
 
+/* Terminal colors (16 first used in escape sequence) */
+struct st_palettes_t {
+    int bg, fg;
+    const char *colorname[16];
+};
+
+// XXX: bg, fg not working well
+static struct st_palettes_t palettes[] = {
+    { .bg = 0, .fg = 7,
+        .colorname = {
+            /* 8 normal colors */
+            "black",
+            "red3",
+            "green3",
+            "yellow3",
+            "blue2",
+            "magenta3",
+            "cyan3",
+            "gray90",
+
+            /* 8 bright colors */
+            "gray50",
+            "red",
+            "green",
+            "yellow",
+            "#5c5cff",
+            "magenta",
+            "cyan",
+            "white",
+        }
+    },
+    { .bg = 0, .fg = 7,
+    //{ .bg = 8, .fg = 13,
+        .colorname = {
+            /* 8 normal colors */
+            "#073642",
+            "#dc322f",
+            "#859900",
+            "#b58900",
+            "#268bd2",
+            "#d33682",
+            "#2aa198",
+            "#eee8d5",
+
+            /* 8 bright colors */
+            "#002b36",
+            "#cb4b16",
+            "#586e75",
+            "#657b83",
+            "#839496",
+            "#6c71c4",
+            "#93a1a1",
+            "#fdf6e3"
+        }
+    },
+    { .bg = 0, .fg = 7,
+    //{ .bg = 8, .fg = 13,
+        .colorname = {
+            /* 8 normal colors */
+            "#eee8d5",
+            "#dc322f",
+            "#859900",
+            "#b58900",
+            "#268bd2",
+            "#d33682",
+            "#2aa198",
+            "#073642",
+
+            /* 8 bright colors */
+            "#fdf6e3",
+            "#cb4b16",
+            "#93a1a1",
+            "#839496",
+            "#657b83",
+            "#6c71c4",
+            "#586e75",
+            "#002b36",
+        }
+    }
+};
+
+static const char **colorname = palettes[0].colorname;
 
 /*
  * Default colors (colorname index)
@@ -150,14 +242,57 @@ static unsigned int mousebg = 0;
  */
 static unsigned int defaultattr = 11;
 
+ResourcePref resources[] = {
+		{ "font",         STRING,  &font },
+		{ "color0",       STRING,  &palettes[0].colorname[0] },
+		{ "color1",       STRING,  &palettes[0].colorname[1] },
+		{ "color2",       STRING,  &palettes[0].colorname[2] },
+		{ "color3",       STRING,  &palettes[0].colorname[3] },
+		{ "color4",       STRING,  &palettes[0].colorname[4] },
+		{ "color5",       STRING,  &palettes[0].colorname[5] },
+		{ "color6",       STRING,  &palettes[0].colorname[6] },
+		{ "color7",       STRING,  &palettes[0].colorname[7] },
+		{ "color8",       STRING,  &palettes[0].colorname[8] },
+		{ "color9",       STRING,  &palettes[0].colorname[9] },
+		{ "color10",      STRING,  &palettes[0].colorname[10] },
+		{ "color11",      STRING,  &palettes[0].colorname[11] },
+		{ "color12",      STRING,  &palettes[0].colorname[12] },
+		{ "color13",      STRING,  &palettes[0].colorname[13] },
+		{ "color14",      STRING,  &palettes[0].colorname[14] },
+		{ "color15",      STRING,  &palettes[0].colorname[15] },
+		{ "background",   STRING,  &extra_colorname[0] }, // 256
+		{ "foreground",   STRING,  &extra_colorname[1] }, // 257
+		{ "cursorColor",  STRING,  &extra_colorname[1] }, // 257
+		{ "termname",     STRING,  &termname },
+		{ "shell",        STRING,  &shell },
+		{ "xfps",         INTEGER, &xfps },
+		{ "actionfps",    INTEGER, &actionfps },
+		{ "blinktimeout", INTEGER, &blinktimeout },
+		{ "bellvolume",   INTEGER, &bellvolume },
+		{ "tabspaces",    INTEGER, &tabspaces },
+		{ "borderpx",     INTEGER, &borderpx },
+		{ "cwscale",      FLOAT,   &cwscale },
+		{ "chscale",      FLOAT,   &chscale },
+};
+
+/*
+ * Force mouse select/shortcuts while mask is active (when MODE_MOUSE is set).
+ * Note that if you want to use ShiftMask with selmasks, set this to an other
+ * modifier, set to 0 to not use it.
+ */
+static uint forcemousemod = ShiftMask;
+
 /*
  * Internal mouse shortcuts.
  * Beware that overloading Button1 will disable the selection.
  */
 static MouseShortcut mshortcuts[] = {
-	/* button               mask            string */
-	{ Button4,              XK_ANY_MOD,     "\031" },
-	{ Button5,              XK_ANY_MOD,     "\005" },
+	/* mask                 button   function        argument       release */
+	{ XK_ANY_MOD,           Button2, selpaste,       {.i = 0},      1 },
+	{ ShiftMask,            Button4, ttysend,        {.s = "\033[5;2~"} },
+	{ XK_ANY_MOD,           Button4, ttysend,        {.s = "\031"} },
+	{ ShiftMask,            Button5, ttysend,        {.s = "\033[6;2~"} },
+	{ XK_ANY_MOD,           Button5, ttysend,        {.s = "\005"} },
 };
 
 /* Internal keyboard shortcuts. */
@@ -176,7 +311,26 @@ static Shortcut shortcuts[] = {
 	{ TERMMOD,              XK_C,           clipcopy,       {.i =  0} },
 	{ TERMMOD,              XK_V,           clippaste,      {.i =  0} },
 	{ TERMMOD,              XK_Y,           selpaste,       {.i =  0} },
+	{ ShiftMask,            XK_Insert,      selpaste,       {.i =  0} },
 	{ TERMMOD,              XK_Num_Lock,    numlock,        {.i =  0} },
+
+	{ MODKEY,               XK_Tab,         setpalette,     {.i = -1} },
+	{ MODKEY,               XK_F1,          setpalette,     {.i = 0} },
+	{ MODKEY,               XK_F2,          setpalette,     {.i = 1} },
+	{ MODKEY,               XK_F3,          setpalette,     {.i = 2} },
+	{ MODKEY,               XK_F4,          setpalette,     {.i = 3} },
+	{ MODKEY,               XK_F5,          setpalette,     {.i = 5} },
+	{ MODKEY,               XK_F6,          setpalette,     {.i = 6} },
+
+	{ MODKEY,               XK_k,           kscrollup,      {.i = 1} },
+	{ MODKEY,               XK_j,           kscrolldown,    {.i = 1} },
+	{ MODKEY,               XK_u,           kscrollup,      {.i = 20} },
+	{ MODKEY,               XK_d,           kscrolldown,    {.i = 20} },
+
+	{ MODKEY|ShiftMask,     XK_K,           zoom,           {.f = +1} },
+	{ MODKEY|ShiftMask,     XK_J,           zoom,           {.f = -1} },
+	{ MODKEY|ShiftMask,     XK_U,           zoom,           {.f = +2} },
+	{ MODKEY|ShiftMask,     XK_D,           zoom,           {.f = -2} },
 };
 
 /*
@@ -194,10 +348,6 @@ static Shortcut shortcuts[] = {
  * * 0: no value
  * * > 0: cursor application mode enabled
  * * < 0: cursor application mode disabled
- * crlf value
- * * 0: no value
- * * > 0: crlf mode is enabled
- * * < 0: crlf mode is disabled
  *
  * Be careful with the order of the definitions because st searches in
  * this table sequentially, so any XK_ANY_MOD must be in the last
@@ -215,13 +365,6 @@ static KeySym mappedkeys[] = { -1 };
  * numlock (Mod2Mask) and keyboard layout (XK_SWITCH_MOD) are ignored.
  */
 static uint ignoremod = Mod2Mask|XK_SWITCH_MOD;
-
-/*
- * Override mouse-select while mask is active (when MODE_MOUSE is set).
- * Note that if you want to use ShiftMask with selmasks, set this to an other
- * modifier, set to 0 to not use it.
- */
-static uint forceselmod = ShiftMask;
 
 /*
  * This is the huge key array which defines all compatibility to the Linux
